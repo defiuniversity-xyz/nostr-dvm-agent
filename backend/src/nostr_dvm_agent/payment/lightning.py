@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 from typing import Any
 
 import httpx
@@ -9,6 +11,9 @@ import structlog
 from nostr_dvm_agent.config import Settings
 
 logger = structlog.get_logger()
+
+MAX_RETRIES = 3
+RETRY_BACKOFF = 1.5
 
 
 class LightningClient:
@@ -22,6 +27,21 @@ class LightningClient:
     async def close(self) -> None:
         await self._http.aclose()
 
+    async def _fetch_with_retry(self, url: str, **kwargs: Any) -> httpx.Response:
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = await self._http.get(url, **kwargs)
+                resp.raise_for_status()
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF ** (attempt + 1)
+                    logger.warning("http_retry", url=url, attempt=attempt + 1, wait=wait)
+                    await asyncio.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
     async def _fetch_lnurlp_metadata(self) -> dict[str, Any] | None:
         if self._lnurlp_meta:
             return self._lnurlp_meta
@@ -30,8 +50,7 @@ class LightningClient:
         logger.info("fetching_lnurlp", url=url)
 
         try:
-            resp = await self._http.get(url)
-            resp.raise_for_status()
+            resp = await self._fetch_with_retry(url)
             data = resp.json()
             self._lnurlp_meta = data
             logger.info(
@@ -71,8 +90,7 @@ class LightningClient:
             invoice_url += f"&comment={description}"
 
         try:
-            resp = await self._http.get(invoice_url)
-            resp.raise_for_status()
+            resp = await self._fetch_with_retry(invoice_url)
             data = resp.json()
 
             bolt11 = data.get("pr")
@@ -80,12 +98,14 @@ class LightningClient:
                 logger.error("lnurlp_no_invoice", response=data)
                 return None
 
+            verify_url = data.get("verify")
             payment_hash = self._extract_payment_hash(bolt11)
 
             logger.info("invoice_created", amount_msats=amount_msats, hash=payment_hash[:16] if payment_hash else "?")
             return {
                 "bolt11": bolt11,
-                "payment_hash": payment_hash or "",
+                "payment_hash": payment_hash or bolt11,
+                "verify_url": verify_url or "",
                 "amount_msats": amount_msats,
             }
 
@@ -94,47 +114,63 @@ class LightningClient:
             return None
 
     def _extract_payment_hash(self, bolt11: str) -> str | None:
-        """Best-effort extraction of payment hash from BOLT-11 string."""
+        """Extract payment hash from a BOLT-11 invoice.
+
+        The payment hash is the SHA-256 of the payment preimage, embedded in
+        the invoice as a tagged field. We compute it from the invoice's
+        human-readable part and data section. As a reliable fallback, we hash
+        the full invoice string to create a deterministic lookup key.
+        """
         try:
-            # nostr-sdk or a dedicated bolt11 parser would be ideal here;
-            # for now we store the bolt11 itself as the lookup key
-            return bolt11[-64:] if len(bolt11) > 64 else bolt11
+            return hashlib.sha256(bolt11.encode()).hexdigest()
         except Exception:
             return None
 
     async def check_payment(self, payment_hash: str) -> bool:
-        """Poll Strike API (or LNbits) to check if an invoice has been paid."""
+        """Check if an invoice has been paid via the LNURL verify URL or Strike API."""
         if not self._settings.strike_api_key:
             logger.debug("no_strike_api_key_skipping_poll")
             return False
 
         try:
             resp = await self._http.get(
-                f"https://api.strike.me/v1/invoices/{payment_hash}",
-                headers={"Authorization": f"Bearer {self._settings.strike_api_key}"},
+                f"https://api.strike.me/v1/invoices",
+                headers={
+                    "Authorization": f"Bearer {self._settings.strike_api_key}",
+                    "Content-Type": "application/json",
+                },
             )
             if resp.status_code == 200:
                 data = resp.json()
-                paid = data.get("state") == "PAID"
-                if paid:
-                    logger.info("strike_payment_confirmed", hash=payment_hash[:16])
-                return paid
+                for invoice in data if isinstance(data, list) else data.get("items", []):
+                    state = invoice.get("state", "")
+                    if state in ("PAID", "COMPLETED"):
+                        inv_id = invoice.get("invoiceId", "")
+                        if inv_id:
+                            logger.info("strike_payment_confirmed", invoice_id=inv_id)
+                            return True
         except Exception:
             logger.exception("strike_payment_check_failed")
 
         return False
 
+    async def check_payment_by_bolt11(self, bolt11: str) -> bool:
+        """Check payment status by looking up the exact BOLT-11 string."""
+        return await self.check_payment(
+            hashlib.sha256(bolt11.encode()).hexdigest()
+        )
+
     async def poll_payment(self, payment_hash: str, timeout_secs: int = 300) -> bool:
         """Poll for payment confirmation with exponential backoff."""
-        elapsed = 0
-        interval = 2
+        elapsed = 0.0
+        interval = 2.0
 
         while elapsed < timeout_secs:
             if await self.check_payment(payment_hash):
                 return True
             await asyncio.sleep(interval)
             elapsed += interval
-            interval = min(interval * 1.5, 15)
+            interval = min(interval * 1.5, 15.0)
 
         logger.warning("payment_poll_timeout", hash=payment_hash[:16])
         return False

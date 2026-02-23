@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import re
 from functools import partial
 from typing import Any
 
+import httpx
 import structlog
 from google import genai
 from google.genai.types import GenerateContentConfig
@@ -13,6 +16,9 @@ from nostr_dvm_agent.config import Settings
 logger = structlog.get_logger()
 
 DEFAULT_MODEL = "gemini-2.5-flash"
+IMAGE_MODEL = "gemini-2.0-flash-exp"
+MAX_RETRIES = 3
+RETRY_BACKOFF = 2.0
 
 
 class GeminiClient:
@@ -21,8 +27,21 @@ class GeminiClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._client = genai.Client(api_key=settings.gemini_api_key)
+        self._model = settings.gemini_model
+        self._http = httpx.AsyncClient(timeout=30)
 
-    def _sync_generate(self, prompt: str, *, system: str = "", temperature: float = 0.7, max_tokens: int = 4096) -> str:
+    async def close(self) -> None:
+        await self._http.aclose()
+
+    def _sync_generate(
+        self,
+        prompt: str,
+        *,
+        system: str = "",
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        model: str | None = None,
+    ) -> str:
         config = GenerateContentConfig(
             temperature=temperature,
             max_output_tokens=max_tokens,
@@ -31,15 +50,27 @@ class GeminiClient:
             config.system_instruction = system
 
         response = self._client.models.generate_content(
-            model=DEFAULT_MODEL,
+            model=model or self._model,
             contents=prompt,
             config=config,
         )
         return response.text or ""
 
     async def _generate(self, prompt: str, **kwargs: Any) -> str:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, partial(self._sync_generate, prompt, **kwargs))
+        last_exc: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(
+                    None, partial(self._sync_generate, prompt, **kwargs)
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF ** (attempt + 1)
+                    logger.warning("gemini_retry", attempt=attempt + 1, wait=wait, error=str(exc))
+                    await asyncio.sleep(wait)
+        raise last_exc  # type: ignore[misc]
 
     async def generate_text(self, prompt: str, **params: Any) -> str:
         temperature = float(params.get("temperature", 0.7))
@@ -68,24 +99,70 @@ class GeminiClient:
         return await self._generate(prompt, system=system, temperature=0.3)
 
     async def generate_image(self, prompt: str, **params: Any) -> str:
-        """
-        Generate an image description or use Gemini's image capabilities.
+        """Generate an image using Gemini's native image generation.
 
-        Note: Gemini's native image generation may require specific model versions.
-        This returns a detailed description that could be fed to an image model,
-        or uses Gemini's vision capabilities if available.
+        Uses response_modalities=["IMAGE", "TEXT"] to request actual image
+        output. Falls back to a text description if image generation is
+        unavailable for the configured model.
         """
-        system = "You are a creative visual artist. Describe the image in vivid detail."
-        enhanced_prompt = f"Create a detailed visual description for: {prompt}"
-
         logger.info("gemini_image", prompt_len=len(prompt))
-        return await self._generate(enhanced_prompt, system=system, temperature=0.8)
 
-    async def extract_text(self, url: str, **params: Any) -> str:
+        try:
+            config = GenerateContentConfig(
+                response_modalities=["IMAGE", "TEXT"],
+                temperature=0.8,
+            )
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                partial(
+                    self._client.models.generate_content,
+                    model=IMAGE_MODEL,
+                    contents=f"Generate an image: {prompt}",
+                    config=config,
+                ),
+            )
+
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, "inline_data") and part.inline_data:
+                    img_bytes = part.inline_data.data
+                    mime = part.inline_data.mime_type or "image/png"
+                    b64 = base64.b64encode(img_bytes).decode()
+                    data_url = f"data:{mime};base64,{b64}"
+                    logger.info("gemini_image_generated", mime=mime, size=len(img_bytes))
+                    return data_url
+
+            if response.text:
+                return response.text
+
+        except Exception:
+            logger.warning("gemini_image_gen_fallback", reason="model may not support image output")
+
+        system = "You are a creative visual artist. Create a vivid, detailed visual description."
+        result = await self._generate(
+            f"Create a detailed visual description for: {prompt}",
+            system=system,
+            temperature=0.8,
+        )
+        return result
+
+    async def extract_text(self, url: str, content: str | None = None, **params: Any) -> str:
+        """Analyze and extract key information from web content.
+
+        If `content` is provided, it is used directly. Otherwise this method
+        only works with content pre-fetched by the caller.
+        """
+        if not content:
+            content = f"[URL: {url} - content was not available for extraction]"
+
         system = "You are an expert at analyzing and extracting key information from web content."
-        prompt = f"Analyze and extract the key information from this URL: {url}\n\nProvide a structured extraction of the main content."
+        prompt = (
+            f"Analyze and extract the key information from the following web page content.\n"
+            f"Source URL: {url}\n\n"
+            f"Content:\n{content[:50000]}"
+        )
 
-        logger.info("gemini_extract", url=url)
+        logger.info("gemini_extract", url=url, content_len=len(content))
         return await self._generate(prompt, system=system, temperature=0.2)
 
     def estimate_tokens(self, text: str) -> int:

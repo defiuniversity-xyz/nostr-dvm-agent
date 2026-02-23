@@ -76,6 +76,10 @@ class Store:
         )
         await self._db.commit()
 
+    _ALLOWED_COLUMNS = frozenset({
+        "bolt11", "invoice_hash", "amount_msats", "result", "error", "input_data",
+    })
+
     async def update_state(
         self,
         event_id: str,
@@ -86,6 +90,8 @@ class Store:
         sets = ["state = ?", "updated_at = ?"]
         params: list[Any] = [state.value, time.time()]
         for key, val in extra.items():
+            if key not in self._ALLOWED_COLUMNS:
+                raise ValueError(f"Disallowed column name: {key}")
             sets.append(f"{key} = ?")
             params.append(val)
         params.append(event_id)

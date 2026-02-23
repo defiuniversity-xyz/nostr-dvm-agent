@@ -12,7 +12,7 @@ import { DVM_SERVICES, type DVMService } from "./lib/types";
 function App() {
   const [selectedService, setSelectedService] = useState<DVMService>(DVM_SERVICES[0]);
   const [currentQuery, setCurrentQuery] = useState("");
-  const { submit, status, payment, result, error, reset } = useNostrJob();
+  const { submit, status, payment, result, error, paymentTimedOut, reset } = useNostrJob();
 
   const hasActivity = status !== "idle";
 
@@ -84,7 +84,7 @@ function App() {
         )}
 
         {payment && status === "payment_required" && (
-          <PaymentModal payment={payment} onClose={handleNewQuery} />
+          <PaymentModal payment={payment} timedOut={paymentTimedOut} onClose={handleNewQuery} />
         )}
       </div>
 

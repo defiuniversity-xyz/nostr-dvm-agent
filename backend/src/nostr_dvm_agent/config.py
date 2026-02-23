@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import Field
+from typing import Any
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +12,7 @@ class Settings(BaseSettings):
     nostr_private_key: str = Field(description="Nostr private key (nsec or hex)")
 
     gemini_api_key: str = Field(description="Google Gemini API key")
+    gemini_model: str = Field(default="gemini-2.5-flash", description="Gemini model to use")
 
     lightning_address: str = Field(
         default="defiuniversity@strike.me",
@@ -21,6 +24,13 @@ class Settings(BaseSettings):
         default=["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"],
         description="Nostr relay WebSocket URLs",
     )
+
+    @field_validator("relay_urls", mode="before")
+    @classmethod
+    def _split_relay_urls(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            return [u.strip() for u in v.split(",") if u.strip()]
+        return v
 
     default_cost_msats: int = Field(default=1000, description="Default cost in millisatoshis")
     cost_text_generation_msats: int = Field(default=500)

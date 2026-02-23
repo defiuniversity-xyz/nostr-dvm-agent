@@ -1,17 +1,31 @@
+import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import type { PaymentInfo } from "../lib/types";
 
 interface PaymentModalProps {
   payment: PaymentInfo;
+  timedOut: boolean;
   onClose: () => void;
 }
 
-export function PaymentModal({ payment, onClose }: PaymentModalProps) {
+export function PaymentModal({ payment, timedOut, onClose }: PaymentModalProps) {
   const sats = Math.ceil(payment.amountMsats / 1000);
+  const [copied, setCopied] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const copyInvoice = async () => {
     await navigator.clipboard.writeText(payment.bolt11);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
+
+  const minutes = Math.floor(elapsed / 60);
+  const seconds = elapsed % 60;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -38,7 +52,7 @@ export function PaymentModal({ payment, onClose }: PaymentModalProps) {
             onClick={copyInvoice}
             className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white font-medium rounded-xl transition-colors"
           >
-            Copy Invoice
+            {copied ? "Copied!" : "Copy Invoice"}
           </button>
           <button
             onClick={onClose}
@@ -48,9 +62,20 @@ export function PaymentModal({ payment, onClose }: PaymentModalProps) {
           </button>
         </div>
 
-        <p className="text-xs text-zinc-400 text-center mt-4">
-          Waiting for payment confirmation...
-        </p>
+        {timedOut ? (
+          <div className="mt-4 text-center">
+            <p className="text-sm text-amber-600 dark:text-amber-400 font-medium">
+              Payment not confirmed yet.
+            </p>
+            <p className="text-xs text-zinc-400 mt-1">
+              If you already paid, the agent may still be processing. Try refreshing.
+            </p>
+          </div>
+        ) : (
+          <p className="text-xs text-zinc-400 text-center mt-4">
+            Waiting for payment confirmation... {minutes}:{seconds.toString().padStart(2, "0")}
+          </p>
+        )}
       </div>
     </div>
   );

@@ -29,8 +29,9 @@ export interface PaymentInfo {
 export const DVM_SERVICES: DVMService[] = [
   { kind: 5001, name: "generate", label: "Generate", description: "AI text generation" },
   { kind: 5000, name: "translate", label: "Translate", description: "Text translation" },
-  { kind: 5001, name: "summarize", label: "Summarize", description: "Text summarization" },
+  { kind: 5001, name: "summarize", label: "Summarize", description: "Text summarization (uses task=summarize param)" },
   { kind: 5100, name: "image", label: "Image", description: "Image generation" },
+  { kind: 5002, name: "extract", label: "Extract", description: "Extract content from URLs" },
 ];
 
 export const RELAY_URLS = (import.meta.env.VITE_RELAY_URLS || "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band")

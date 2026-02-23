@@ -11,7 +11,6 @@ from nostr_sdk import (
     Filter,
     Keys,
     Kind,
-    KindEnum,
     NostrSigner,
     PublicKey,
     Tag,

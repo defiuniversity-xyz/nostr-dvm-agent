@@ -8,6 +8,10 @@ export function getPool(): SimplePool {
   return pool;
 }
 
+export function closePool(): void {
+  pool.close(RELAY_URLS);
+}
+
 export async function publishJobRequest(
   keys: KeyPair,
   kind: number,
@@ -73,9 +77,15 @@ export function subscribeFeedback(
 
       if (status === "payment-required" && bolt11) {
         onFeedback(status, { bolt11, amountMsats });
-      } else {
+      } else if (status) {
         onFeedback(status);
       }
+    },
+    onclose(reasons: string[]) {
+      console.warn("[nostr] feedback subscription closed:", reasons);
+    },
+    oneose() {
+      // End of stored events -- live subscription continues
     },
   });
 
@@ -100,6 +110,12 @@ export function subscribeResult(
         kind: event.kind,
         timestamp: event.created_at,
       });
+    },
+    onclose(reasons: string[]) {
+      console.warn("[nostr] result subscription closed:", reasons);
+    },
+    oneose() {
+      // End of stored events -- live subscription continues
     },
   });
 

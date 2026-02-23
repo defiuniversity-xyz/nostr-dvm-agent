@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import structlog
-from nostr_sdk import Event, Tag
+from nostr_sdk import Event, PublicKey, Tag
 
 from nostr_dvm_agent.config import Settings
 from nostr_dvm_agent.core.event_handler import extract_job_input, get_primary_input_text
 from nostr_dvm_agent.core.nostr_client import NostrClient
 from nostr_dvm_agent.db.store import JobState, Store
 from nostr_dvm_agent.payment.lightning import LightningClient
+from nostr_dvm_agent.security.encryption import decrypt_content, encrypt_content, is_encrypted
 from nostr_dvm_agent.services.base import BaseDVMService
 
 logger = structlog.get_logger()
@@ -47,6 +49,22 @@ class StateMachine:
         event_id = job_data["event_id"]
         kind = job_data["kind"]
         customer = job_data["pubkey"]
+
+        if is_encrypted(event):
+            logger.info("encrypted_job_detected", event_id=event_id)
+            try:
+                sender_pk = PublicKey.from_hex(customer)
+                decrypted = decrypt_content(
+                    self._nostr.keys, sender_pk, event.content()
+                )
+                if decrypted:
+                    decrypted_data = json.loads(decrypted)
+                    if isinstance(decrypted_data, dict):
+                        job_data.update(decrypted_data)
+                    job_data["encrypted"] = True
+                    logger.info("job_decrypted", event_id=event_id)
+            except Exception:
+                logger.exception("job_decryption_failed", event_id=event_id)
 
         service = self._services.get(kind)
         if not service:
@@ -117,13 +135,30 @@ class StateMachine:
         if not job:
             return
 
-        import json
         job_data = json.loads(job["input_data"]) if job["input_data"] else {}
+        is_enc = job_data.get("encrypted", False)
 
         try:
             result = await service.execute(job_data)
+
+            if is_enc:
+                try:
+                    recipient_pk = PublicKey.from_hex(customer)
+                    encrypted_result = encrypt_content(
+                        self._nostr.keys, recipient_pk, result
+                    )
+                    if encrypted_result:
+                        result = encrypted_result
+                        logger.info("result_encrypted", event_id=event_id)
+                except Exception:
+                    logger.exception("result_encryption_failed", event_id=event_id)
+
             await self._store.update_state(event_id, JobState.COMPLETED, result=result)
-            await self._nostr.publish_result(event_id, customer, kind, result)
+
+            extra_tags = [Tag.parse(["encrypted"])] if is_enc else None
+            await self._nostr.publish_result(
+                event_id, customer, kind, result, extra_tags=extra_tags
+            )
             logger.info("job_completed", event_id=event_id)
 
         except Exception as exc:
