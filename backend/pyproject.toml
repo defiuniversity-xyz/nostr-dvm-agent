@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nostr-dvm-agent"
+version = "0.1.0"
+description = "sats.ai - Nostr DVM AI Agent powered by Gemini 3 Pro and Lightning payments"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+dependencies = [
+    "nostr-sdk>=0.37.0",
+    "google-genai>=1.0.0",
+    "httpx>=0.28.0",
+    "pydantic-settings>=2.7.0",
+    "aiosqlite>=0.21.0",
+    "structlog>=25.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

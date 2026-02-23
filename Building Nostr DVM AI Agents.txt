@@ -1,0 +1,318 @@
+﻿Autonomous AI Agents on the Nostr Protocol: A Technical Implementation Guide for NIP-90 Data Vending Machines
+The convergence of decentralized communication protocols and cryptographic payment networks has birthed a novel architecture for autonomous artificial intelligence agents. Historically, the deployment of Large Language Models (LLMs) and other AI services has relied on centralized REST APIs, requiring users to submit to restrictive terms of service, fiat-based subscription models, and opaque data harvesting practices. The Nostr protocol, inherently a decentralized network of clients and relays utilizing cryptographic keypairs for identity, provides an alternative framework.1 Within this ecosystem, the Nostr Implementation Possibility 90 (NIP-90) defines the Data Vending Machine (DVM) standard, establishing a permissionless, event-driven marketplace for computational tasks.3
+Under the NIP-90 framework, an autonomous AI agent acts as a Service Provider—a headless client listening to the network for specific cryptographic events representing job requests.4 Customers broadcast these requests, and the agent, operating entirely autonomously, evaluates the task, demands payment over the Bitcoin Lightning Network, processes the workload, and returns the encrypted result.3 This protocol establishes a "Work-for-Sats" economy where machine-to-machine micropayments settle instantly without counterparty risk or traditional banking infrastructure.6 The implementation of such an autonomous agent requires a rigorous orchestration of network discovery models, WebSocket subscriptions, cryptographic signature verification, and secure payload encryption.8
+Architectural Foundations and Network Discovery
+The architectural foundation of an autonomous AI agent on Nostr relies on efficient network navigation. Unlike centralized systems with a single point of entry or a unified load balancer, Nostr operates as a sparse mesh of independent WebSocket relay servers.2 To function effectively, an agent must optimize how it discovers job requests and how it advertises its computational capabilities to the broader network ecosystem without overwhelming its own bandwidth or relying on a central indexer.10
+The Outbox Model for Multi-Relay Resilience
+The Nostr network currently consists of over 950 active public relays globally, creating a highly fragmented data availability landscape.11 An autonomous agent attempting to subscribe to every known relay to capture job requests would face insurmountable bandwidth constraints, extreme compute overhead, and a high likelihood of encountering rate limits or IP bans.10 In the early iterations of the protocol, clients relied on a naive global broadcast strategy or the "Gossip Model," reading posts from relays where target authors were known to publish.10 However, the modern standard dictates the implementation of the "Outbox Model," formally supported by NIP-65 (Relay List Metadata).10
+The Outbox Model shifts the network discovery paradigm from a passive global listening approach to a highly targeted, user-centric routing topology.10 Under NIP-65, users publish a special replaceable event (Kind 10002) that advertises a curated list of relays where they exclusively write their data and relays where they prefer to read their mentions.14 This event contains an array of r tags, each pointing to a WebSocket URL, optionally appended with a read or write marker.14
+For an autonomous agent to implement multi-relay resilience, it must maintain an internal routing table that maps user public keys (npubs) to their preferred Outbox relays.10 Architectural implementations frequently utilize a local SQLite database or an equivalent lightweight relational datastore to track these state changes.10 When a user modifies their NIP-65 list, the agent updates its internal database.
+When the AI agent operates, it does not passively listen to random public relays. Instead, it actively queries its routing database for the write relays of potential customers or known entities within the network. By connecting specifically to the write relays of these users, the agent guarantees it will intercept their Kind 5000–5999 job requests the moment they are published.4 Furthermore, the Outbox Model ensures high resilience; if a single relay experiences downtime or suffers a distributed denial-of-service (DDoS) attack, the agent dynamically adjusts its connection pool based on the redundant write relays listed in the users' Outbox metadata.14 This creates a robust, self-healing network topology that entirely avoids central frontend dependencies or single points of failure.2
+Crafting Subscription Filters for Job Discovery
+Within the NIP-90 specification, job requests are categorized by distinct event kinds ranging from 5000 to 5999, with corresponding job results utilizing the 6000 to 6999 range.3 The protocol dictates that the result kind is always exactly 1000 integers higher than the request kind.4 To offer specific AI services, such as Large Language Model text generation, image rendering, or audio transcription, the agent must establish WebSocket connections to its curated relay pool and transmit properly formatted REQ (Request) filters.2
+For text-to-text generation tasks, the community standard relies on Kind 5001, while audio-to-text may use Kind 5050 or other designated identifiers.5 The subscription filter is a JSON array initiated with the REQ string, followed by a unique subscription ID, and a filter object that strictly defines the parameters of the events the agent wishes to receive.2 To minimize noise and prevent the agent from processing historical backlog, the filter must specify the exact job kind and limit the historical timeframe using the since parameter containing a current Unix timestamp. Optionally, the filter can isolate tasks via specific tag queries, enabling the agent to target prompts intended exclusively for its hardware.
+Below is the technical implementation of the subscription filter logic, utilizing the standard nostr-sdk architecture in Rust.19 This snippet demonstrates how the agent initializes its cryptographic identity, constructs a targeted relay pool, and establishes a listening state for NIP-90 jobs:
+
+
+Rust
+
+
+
+
+// NIP-90 Subscription Filter Implementation for Autonomous AI Agents
+use nostr_sdk::prelude::*;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+   // Initialize the agent's cryptographic identity from a secure environment
+   // The private key must be protected, as it controls the agent's financial balances
+   let agent_keys = Keys::parse("hex-or-bech32-secret-key")?;
+   
+   // Initialize the Nostr client with a configured relay pool
+   // In production, these URLs are dynamically populated via the NIP-65 Outbox Model
+   let client = Client::new(&agent_keys);
+   client.add_relay("wss://relay.damus.io").await?;
+   client.add_relay("wss://nos.lol").await?;
+   client.add_relay("wss://relay.nostr.band").await?;
+   
+   // Establish WebSocket connections to the defined relay pool
+   client.connect().await;
+
+   // Determine the current Unix timestamp to ignore historical jobs
+   // This prevents the agent from attempting to process expired or already-fulfilled requests
+   let now = Timestamp::now();
+
+   // Construct the REQ filter targeting Kind 5001 (Text/LLM Generation)
+   // The filter strictly isolates pending requests originating after the agent's boot time
+   let job_filter = Filter::new()
+      .kind(Kind::Custom(5001))
+      .since(now)
+       // Optionally, the agent can filter for jobs explicitly tagging its public key
+       // using a '#p' tag query to ensure it only processes direct invocations
+       //.pubkey(agent_keys.public_key()) 
+      .limit(10);
+
+   // Transmit the REQ frame to the active relay pool
+   client.subscribe(vec![job_filter], None).await;
+
+   println!("Agent initialized. Listening for Kind 5001 job requests...");
+
+   // Initialize the asynchronous event loop to process incoming WebSocket frames
+   client.handle_notifications(|notification| async {
+       if let RelayPoolNotification::Event { event,.. } = notification {
+           // Verify the intercepted event matches the target compute workload
+           if event.kind == Kind::Custom(5001) {
+               println!("Intercepted LLM Job Request. Event ID: {}", event.id);
+               
+               // Cryptographically verify the signature of the job request
+               if event.verify().is_ok() {
+                   // Dispatch the verified event to the state machine for payment evaluation
+                   // process_job_request(event).await;
+               } else {
+                   eprintln!("Invalid signature detected on job request. Discarding.");
+               }
+           }
+       }
+       Ok(false)
+   }).await?;
+
+   Ok(())
+}
+
+This implementation ensures that the agent remains dormant at the network level, conserving local computational resources and relay bandwidth, until a cryptographically valid NIP-90 job request is broadcast to the network.19
+Network Advertising via NIP-89 Handler Information
+While an autonomous agent can passively listen for jobs, sustained economic viability in a decentralized marketplace requires active network advertising. The Nostr protocol facilitates this through NIP-89, which defines the Handler Information event (Kind 31990).4 This event architecture allows the Data Vending Machine to cryptographically declare its supported job kinds, pricing models, and specific computational capabilities to the broader network ecosystem.3
+When a user's client application encounters a feature request it cannot process locally—such as generating a complex image, executing a LangChain workflow, or translating text via an LLM—the client queries the network for Kind 31990 events to discover capable Service Providers.3 The agent publishes this event containing highly structured metadata. The content field encapsulates a stringified JSON object containing the application's name, description, and visual assets, mirroring the structure of standard NIP-01 user metadata.4
+Crucially, the discoverability mechanics rely on k tags within the event array. An AI agent specializing in LLM generation will include ["k", "5001"] in its Handler Information tags.4 The specification allows multiple k tags to exist within the same event if the application supports more than one event kind, enabling multi-modal AI agents to advertise diverse services simultaneously.4
+Furthermore, the agent utilizes specific parameter tags within the Kind 31990 event to advertise its base pricing in millisatoshis, its supported encryption standards, and its processing parameters.3 This transparent advertising mechanism allows client applications to algorithmically rank and select agents based on market rates, geographic latency to relays, and historical reliability before the user even issues the job request.4 By broadcasting a static Kind 31990 event upon boot, the autonomous agent seamlessly integrates into the global registry of available compute resources without requiring a centralized domain name or Web2 hosting infrastructure.22
+The "Work-for-Sats" Workflow and Cryptographic Handshakes
+The defining characteristic of a NIP-90 Data Vending Machine is its native integration with the Bitcoin Lightning Network. The protocol entirely bypasses traditional fiat payment gateways, credit card processors, and subscription paywalls, establishing a fluid, programmatic "Work-for-Sats" economy.5 The execution of this economy demands a complex cryptographic handshake involving NIP-90 job feedback events and NIP-57 Zaps to ensure atomic, trustless micropayments between human users and headless software.5
+Issuing Payment-Required Feedback Events
+Upon intercepting a Kind 5001 job request via its WebSocket subscription, the autonomous agent must first evaluate the computational cost of the prompt.3 Factors such as the input token count, the requested model complexity (e.g., Llama 3 vs. an open-source smaller model), and current hardware utilization dictate the required fee. Once calculated, the agent deliberately halts the job execution and demands payment by constructing a Job Feedback event (Kind 7000).4
+The Kind 7000 event acts as the asynchronous communication layer between the headless agent and the human customer's client UI.5 To construct this event properly, the agent's backend interfaces with its own Lightning Network node (such as Core Lightning or LND) or an enterprise LNURL provider to generate a Lightning Network BOLT-11 invoice for the required millisatoshi amount.5
+The agent then publishes the Kind 7000 event to the network. The payload of this event must include a status tag set precisely to the string payment-required.25 To ensure the client software routes the payment correctly, the agent embeds the requested amount in an amount tag and includes the BOLT-11 string in a bolt11 tag.5 Furthermore, protocol specifications mandate that the agent must include an e tag referencing the original Kind 5001 job request's event ID, as well as a p tag referencing the customer's public key.1 This ensures relational database integrity across the distributed relays, allowing the customer's client to map the invoice directly to the pending job.5 The customer's client interprets this Kind 7000 event, renders the Lightning QR code or deep link to the user, and waits for the payment to be settled.5
+The Anatomy of NIP-57 Zaps
+Once the customer pays the BOLT-11 invoice via their Lightning wallet, the NIP-57 Zap protocol is triggered.7 NIP-57 introduces two specific event kinds to bridge the Lightning Network's financial finality with Nostr's data layer: Kind 9734 (Zap Request) and Kind 9735 (Zap Receipt).7
+The Zap Request (Kind 9734) is authored by the customer's client, indicating their explicit intent to pay for a specific event or service.7 When the payment successfully settles across the Lightning Network routing nodes, the recipient's Lightning Network provider automatically generates and publishes the Zap Receipt (Kind 9735) to the Nostr relays.6 This event serves as public, cryptographic proof of payment.6
+For the autonomous agent, listening for and cryptographically verifying this Kind 9735 event is the most critical security juncture in the entire implementation.6 Failure to rigorously audit the Zap Receipt exposes the agent to invoice substitution attacks, replay attacks, and the theft of costly compute resources.6 The verification process is multi-layered, requiring checks against the event signature, the provider's public key, and the embedded Lightning data.6
+First, the agent must extract the pubkey from the Kind 9735 event and cross-reference it with the verified nostrPubkey published by the agent's own LNURL provider.6 This ensures the receipt was actually minted by the agent's own banking infrastructure, not forged by a malicious actor broadcasting a fake receipt.6 Second, the agent verifies the BIP-340 Schnorr signature of the Kind 9735 event over the serialized event ID array, ensuring the payload has not been tampered with in transit.6
+Cryptographic Verification Logic and Hash Auditing
+The most complex vector of the NIP-57 verification involves the SHA-256 description hash audit. Within the Lightning Network BOLT-11 specification, an invoice contains a hashed description of the payment's purpose to prevent tampering.6 NIP-57 mandates that this hash must perfectly match the SHA-256 digest of the raw, stringified JSON of the Kind 9734 Zap Request.6
+The agent must extract the description tag from the Kind 9735 event, which contains the embedded Kind 9734 JSON string.6 It performs a SHA-256 cryptographic hash on this exact string. Simultaneously, the agent parses the bolt11 invoice from the Zap Receipt, decodes the Bech32m formatting, and extracts the embedded description_hash.6
+Let    denote the SHA-256 hash function,    denote the stringified JSON of the Zap Request, and    denote the description hash decoded from the Lightning invoice. The core security assertion requires that:
+  
+
+If these hashes diverge, the payment is structurally invalid. This divergence indicates that the receipt does not mathematically correspond to the invoice issued for the specific NIP-90 job, meaning the user may be attempting to replay an old payment or substitute a lower-value invoice.6 Furthermore, the agent must ensure that the amount paid in the invoice equals or exceeds the amount originally requested in the Kind 7000 event.5
+Below is the technical implementation of this sophisticated verification logic, written in Rust, demonstrating how an agent secures its computational resources:
+
+
+Rust
+
+
+
+
+// NIP-57 Zap Receipt Verification Logic for Autonomous Agent Payment Processing
+use nostr_sdk::prelude::*;
+use sha2::{Sha256, Digest};
+use lightning_invoice::Bolt11Invoice;
+use std::str::FromStr;
+
+/// Cryptographically audits a Kind 9735 Zap Receipt to authorize DVM job execution
+/// Returns true if the payment is mathematically sound and matches the required fee.
+fn verify_zap_receipt(
+   zap_receipt: &Event, 
+   expected_amount_msats: u64, 
+   expected_provider_pubkey: &PublicKey
+) -> Result<bool, Box<dyn std::error::Error>> {
+   
+   // Step 1: Validate the event kind and the signature source
+   if zap_receipt.kind!= Kind::ZapReceipt {
+       eprintln!("Verification Failed: Event is not Kind 9735.");
+       return Ok(false);
+   }
+   
+   // The event MUST be signed by the agent's trusted LNURL provider's public key
+   // This prevents malicious actors from publishing forged receipts
+   if zap_receipt.pubkey!= *expected_provider_pubkey {
+       eprintln!("Verification Failed: Provider Pubkey mismatch.");
+       return Ok(false);
+   }
+
+   // Step 2: Validate the BIP-340 Schnorr signature of the event itself
+   // Ensures the payload integrity of the Zap Receipt
+   zap_receipt.verify()?;
+
+   // Step 3: Extract the BOLT-11 invoice and the embedded Zap Request (Kind 9734)
+   let bolt11_str = zap_receipt.tags.iter().find_map(|t| {
+       if let Tag::Bolt11(b) = t { Some(b) } else { None }
+   }).ok_or("Protocol Error: Missing bolt11 tag in Zap Receipt")?;
+
+   let description_str = zap_receipt.tags.iter().find_map(|t| {
+       if let Tag::Description(d) = t { Some(d) } else { None }
+   }).ok_or("Protocol Error: Missing description tag in Zap Receipt")?;
+
+   // Step 4: Perform the SHA-256 Description Hash Audit
+   // Hash the exact stringified JSON of the embedded Kind 9734 event
+   let mut hasher = Sha256::new();
+   hasher.update(description_str.as_bytes());
+   let calculated_hash = hasher.finalize();
+
+   // Decode the Lightning Invoice to extract the embedded description hash
+   let invoice = Bolt11Invoice::from_str(bolt11_str)?;
+   let invoice_hash = invoice.description_hash()
+      .ok_or("Protocol Error: Invoice lacks a description hash")?;
+
+   // Cryptographically enforce that the hash of the 9734 event matches the invoice
+   // This is the primary defense against invoice substitution and replay attacks
+   if calculated_hash.as_slice()!= invoice_hash.as_ref() {
+       eprintln!("Security Failure: Description Hash Mismatch. Possible Replay Attack.");
+       return Ok(false);
+   }
+
+   // Step 5: Verify the payment amount matches the agent's demanded fee
+   let invoice_amount = invoice.amount_milli_satoshis().unwrap_or(0);
+   if invoice_amount < expected_amount_msats {
+       eprintln!("Security Failure: Insufficient Payment. Expected {}, received {}", 
+                 expected_amount_msats, invoice_amount);
+       return Ok(false);
+   }
+
+   // Internal validation of the nested Zap Request parameters
+   // Ensure the embedded 9734 event is itself cryptographically valid
+   let zap_request: Event = Event::from_json(description_str)?;
+   zap_request.verify()?;
+
+   // If all cryptographic and financial assertions hold true, authorize the job
+   println!("Payment successfully verified. Authorizing compute workload.");
+   Ok(true)
+}
+
+Only when this function returns a definitive success does the agent transition the state machine from a pending payment status to active processing, effectively eliminating counterparty risk in the decentralized compute marketplace.6
+Job Execution, State Machine Navigation, and Fault Tolerance
+The orchestration of an autonomous agent requires a strictly defined state machine to manage asynchronous network conditions, user interactions, and lengthy compute times. Unlike synchronous REST API calls that hold a connection open until a timeout occurs, Nostr relies on decoupled event broadcasting. The NIP-90 protocol requires the agent to rigorously publish state updates to the network to prevent the customer's client UI from assuming the agent has failed or gone offline.25
+Data Vending Machine State Machine Transitions
+The lifecycle of a NIP-90 job request is dictated by the progression of event kinds and specialized status tags embedded within Kind 7000 feedback events.4 The transition matrix moves sequentially from the initial request to intermediate feedback states and culminates in the final delivery of the compute product.
+The standardized sequence of interactions and state transitions is mapped in the following architectural table:
+Phase
+	Nostr Event Kind
+	status Tag
+	Network Direction
+	Architectural Description & Payload Dynamics
+	1. Initiation
+	5000-5999 (Req)
+	N/A
+	Customer    Relays
+	The customer broadcasts the job request. Contains i (input) parameters, the desired model param, and optionally an encrypted payload.
+	2. Fee Assessment
+	7000 (Feedback)
+	payment-required
+	Agent    Relays
+	The agent halts processing. The event contains an amount tag (in millisats), a bolt11 invoice tag, and an e tag linking to the job request.
+	3. Settlement
+	9735 (Zap Receipt)
+	N/A
+	LN Node    Relays
+	The Lightning provider broadcasts cryptographic proof of payment via the Zap Receipt, satisfying the invoice constraint.
+	4. Execution
+	7000 (Feedback)
+	processing
+	Agent    Relays
+	The agent acknowledges the payment verification and signals that CPU/GPU resources are actively dedicated to the prompt.
+	5a. Delivery
+	6000-6999 (Result)
+	success
+	Agent    Relays
+	Final delivery. The event kind is exactly 1000 higher than the request kind. Contains the final AI output in the content field.
+	5b. Fault State
+	7000 (Feedback)
+	error
+	Agent    Relays
+	If hardware fails, APIs timeout, or the prompt violates safety filters, the agent terminates the job and reports an error state to the UI.
+	5c. Streaming
+	7000 (Feedback)
+	partial
+	Agent    Relays
+	Used for streaming LLM tokens or multi-stage rendering. The agent emits sequential partial results to provide real-time feedback.
+	This state machine ensures that both the autonomous agent and the human customer remain synchronized across a distributed, asynchronous relay mesh.26 If a job requires extensive compute time—such as rendering a high-fidelity video or fine-tuning a model over several hours—the continuous broadcast of processing and partial feedback events prevents the client from abandoning the connection or requesting a refund.26
+Furthermore, implementing this state machine provides necessary fault tolerance. If the agent's primary process crashes during the processing state, upon reboot, it can query the relay pool for its own Kind 7000 events, identify jobs that were paid for but never reached the success state (Kind 6xxx), and automatically resume the workload. This architectural resilience is unique to the event-driven nature of the Nostr protocol.25
+Cryptographic Privacy: Implementation of NIP-44 Version 2 Encryption
+Because the Nostr network is fundamentally a public broadcast medium where all events are distributed in plaintext JSON, executing sensitive AI workloads demands robust cryptographic privacy overlays.8 A user querying an autonomous agent for medical advice, proprietary code analysis, or financial forecasting cannot broadcast their i (input) tags publicly without violating basic operational security. To solve this, NIP-90 mandates the support of encrypted payloads.5
+The Deprecation of NIP-04 and Padding Oracles
+Historically, the Nostr network utilized NIP-04 for encrypted direct messages and private payloads, which relied on the AES-256-CBC encryption algorithm.8 However, protocol engineers deprecated NIP-04 due to critical cryptographic vulnerabilities.28 The most severe flaw in NIP-04 was the lack of a Message Authentication Code (MAC) verifying the integrity of the ciphertext before decryption.8 This architectural oversight exposed clients to severe padding oracle attacks, where a malicious actor could intercept an encrypted payload, modify the padding bytes, and observe the client's error responses to systematically decrypt the message without knowing the private key. Additionally, NIP-04 lacked forward secrecy and post-compromise security.8
+The ChaCha20 and HMAC-SHA256 Pipeline
+To resolve these vulnerabilities, NIP-44 Version 2 was introduced, providing a robust, versioned payload architecture utilizing the ChaCha20 symmetric cipher and HMAC-SHA256.8 When a customer wishes to keep their job request private, they encrypt the i (input) and param tags utilizing a shared secret derived from their private key and the agent's public key.22 The resulting ciphertext is placed into the event's content field, and an encrypted tag is appended to the event's tag array.5
+The autonomous agent must implement a precise cryptographic pipeline to decrypt the payload, process the data, and securely re-encrypt the result. Protocol specifications dictate the following sequential operations:
+1. Shared Secret Derivation (ECDH): The agent performs Elliptic Curve Diffie-Hellman (ECDH) scalar multiplication. By multiplying the customer's public key point on the secp256k1 curve by the agent's own private key scalar, the agent calculates the shared coordinate. The output is the unhashed, 32-byte encoded X-coordinate of the shared point.8
+2. Key Expansion (HKDF): The shared 32-byte X-coordinate is passed through a Hash-based Key Derivation Function (HKDF) to generate deterministic message keys. Concurrently, a random 32-byte nonce is generated using a Cryptographically Secure Pseudorandom Number Generator (CSPRNG).8 NIP-44 explicitly utilizes ChaCha20 rather than XChaCha to adhere to established cryptographic standards, despite the smaller nonce space.8
+3. Authentication Before Decryption: To definitively neutralize padding oracle vulnerabilities, NIP-44 v2 mandates that the payload is authenticated before any decryption attempts.8 The base64-decoded payload from the job request contains the version byte, the nonce, the ciphertext, and a MAC. The agent calculates the HMAC-SHA256 of the ciphertext and compares it against the decoded MAC. If the values diverge by even a single bit, the agent immediately throws a cryptographic error and aborts the job to prevent side-channel data leakage.8
+4. Symmetric Decryption: Upon successful MAC validation, the agent utilizes the ChaCha20 cipher with the derived key and nonce to decrypt the ciphertext.8 It then strips the appended padding to reveal the raw JSON string containing the private input parameters.
+Once the AI model generates the final response, the agent reverses this entire cryptographic pipeline. The output text is formatted, padded to obscure the exact message length, and encrypted via ChaCha20 using the shared secret.8 The agent calculates a new HMAC-SHA256 MAC, and concatenates the components into a strict binary structure: version + nonce + ciphertext + mac.8
+This final binary array is base64-encoded and placed into the content field of the Kind 6xxx result event.5 Crucially, to maintain total privacy, the agent must attach the encrypted string tag to the Kind 6xxx event and must entirely omit the plaintext i tags from the result object, ensuring zero metadata leakage to the public relays.5
+Ecosystem Mapping and Infrastructure Integration
+The successful deployment of an autonomous agent relies heavily on selecting appropriate network infrastructure and protocol engineering libraries. The Nostr ecosystem has matured significantly, transitioning from experimental hobbyist tools to highly optimized, production-grade infrastructure tailored for heavy data loads, streaming media, and DVM interactions.9
+Topography of Active DVM Relays
+As of late 2025 and early 2026, the Nostr relay topography has stratified into general-purpose public relays, paid anti-spam relays, and specialized application-specific relays.9 An autonomous AI agent must strategically select its primary relay connections to ensure high uptime, low latency, and optimal reach to potential customers.9
+The current active relays most conducive to Data Vending Machine traffic and high-bandwidth job requests include:
+
+
+Relay URL
+	Categorization
+	Architectural Focus and DVM Utility
+	wss://relay.damus.io
+	Public Global
+	Operated by key protocol contributors, this relay maintains high uptime and serves a massive user base across North America. It acts as a primary hub for global event broadcasting, making it essential for DVM discoverability and initial job requests.29
+	wss://nos.lol
+	Public Global
+	Consistently ranked among the most stable global relays, offering high-reliability infrastructure with an open community policy. Ideal for agents listening to a wide net of Kind 5xxx events across diverse client applications.29
+	wss://relay.nostr.band
+	Specialized Search
+	A heavily optimized, search-focused relay that indexes complex data. While primarily used for full-text search, its robust database architecture allows agents to efficiently query historical Kind 31990 events for competitive market analysis and pricing.29
+	wss://nostr.mutinywallet.com
+	Paid / Specialized
+	A high-reliability "blast" relay focused on fast propagation and zero failures. This relay is highly recommended for transmitting the agent's final Kind 6000 output events to ensure they immediately reach the customer's client without WebSocket timeouts.29
+	wss://nostr.wine
+	Public Ecosystem
+	A widely utilized relay within the broader developer ecosystem, often paired with indexers and filter relays (filter.nostr.wine) to manage large data sets and prevent spam overload during job execution.30
+	Recommended Protocol Engineering Libraries
+Building the cryptographic primitives and WebSocket managers from scratch is highly discouraged due to the extreme mathematical complexity of BIP-340 Schnorr signatures, Lightning BOLT-11 parsing, and raw WebSocket frame management. Protocol engineers have established several robust development kits tailored to different operational environments.
+For systems demanding extreme concurrency, memory safety, and high-performance execution, the rust-nostr and nostr-sdk libraries are the industry standard.19 Written entirely in Rust, these crates provide high-level abstractions for Event Building, NIP-06 key derivation, Outbox database management via SQLite integration, and native NIP-44 v2 encryption bindings.19 The nostr-sdk library natively supports asynchronous connection pooling, automatically handling relay disconnects, ping/pong keepalives, and concurrent event streams.19 This is critical for an autonomous agent that must run uninterrupted as a daemon process for months at a time. The crates are highly modular; engineers can enable specific cargo features such as nip44 for encryption, nip57 for Zaps, and tor for routing traffic through the onion network.19
+For engineers prioritizing rapid iteration and native integration with Python-based AI frameworks—such as PyTorch, LangChain, TensorFlow, or the Model Context Protocol (MCP)—the nostr-dvm and ezdvm Python libraries offer streamlined, purpose-built solutions.18 The nostr-dvm framework explicitly abstracts the NIP-90 state machine, automatically handling the transition from Kind 5xxx to Kind 7000 to Kind 6xxx.18 This architecture allows the engineer to subclass the main DVM object and focus solely on the do_work() function where the actual AI model inference occurs.18 While Python frameworks introduce a slight performance overhead in network handling compared to Rust, they vastly reduce the time-to-market for deploying complex LLM wrappers and LangChain toolsets to the Nostr network.18
+Additionally, the implementation of Nostrify is highly recommended for managing the complexities of the Outbox Model. Nostrify provides robust database adapters, such as Kysely with Deno SQLite, tailored specifically for tracking NIP-65 routing tables.10 This allows the agent to dynamically shift its WebSocket connections in real-time based on where its users are actively publishing, ensuring maximum uptime and request capture without relying on static, hardcoded relay lists.10
+Conclusion
+The implementation of an autonomous AI agent utilizing the NIP-90 Data Vending Machine framework represents a fundamental shift in how computational resources are monetized and distributed across global networks. By synthesizing the decentralized, permissionless routing of the Nostr protocol with the cryptographic financial finality of the Bitcoin Lightning Network, engineers can deploy AI services that operate entirely outside of traditional corporate infrastructure, restrictive API gateways, and fiat payment processors.
+The successful deployment of such an autonomous agent demands strict adherence to evolving protocol specifications. Utilizing the Outbox Model via NIP-65 guarantees network resilience and efficient job discovery, while precise Handler Information metadata via NIP-89 ensures algorithmic market discoverability. The integrity of the permissionless "Work-for-Sats" economy rests entirely on the rigorous cryptographic auditing of NIP-57 Zap Receipts—specifically the implementation of the SHA-256 description hash verification—to prevent financial exploitation and replay attacks. Finally, mapping the complex NIP-90 state machine alongside NIP-44 Version 2 ChaCha20 encryption ensures that the agent can process sensitive workloads asynchronously, securely, and reliably. As the relay infrastructure matures and specialized development kits like rust-nostr and nostr-dvm continue to evolve, the deployment of headless, self-monetizing AI entities will continue to expand, establishing a truly open, permissionless marketplace for global compute workloads.
+Works cited
+1. Nostr Series — Part 2: One Object To Rule Them All! | by Michael Stewart | Medium, accessed February 23, 2026, https://medium.com/@michael.leigh.stewart/nostr-series-part-2-one-object-to-rule-them-all-c292db817938
+2. The Nostr Protocol, accessed February 23, 2026, https://nostr.how/en/the-protocol
+3. FEDSTR: Money-In AI-Out | A Decentralized Marketplace for Federated Learning and LLM Training on the NOSTR Protocol - arXiv, accessed February 23, 2026, https://arxiv.org/pdf/2404.15834
+4. Nostr Book | PDF | Telecommunications | Software - Scribd, accessed February 23, 2026, https://www.scribd.com/document/865299243/Nostr-Book
+5. NIP90 - NIP-90 - Data Vending Machine, accessed February 23, 2026, https://nips.nostr.com/90
+6. NIP57 - NIP-57 - Lightning Zaps - NIPs (Nostr Improvement Proposals), accessed February 23, 2026, https://nips.nostr.com/57
+7. nips/57.md at master · nostr-protocol/nips - GitHub, accessed February 23, 2026, https://github.com/nostr-protocol/nips/blob/master/57.md
+8. nips/44.md at master · nostr-protocol/nips - GitHub, accessed February 23, 2026, https://github.com/nostr-protocol/nips/blob/master/44.md
+9. What are Nostr Relays?, accessed February 23, 2026, https://nostr.how/en/relays
+10. The Outbox Model - Nostrify, accessed February 23, 2026, https://nostrify.dev/relay/outbox
+11. The Latest in Nostr: Weekly Nostr Recap (22nd December 2025–55th Edition) | by Nomishkadilshan | Dec, 2025 | Medium, accessed February 23, 2026, https://medium.com/@nomishkadilshan4/%EF%B8%8F-the-latest-in-nostr-weekly-nostr-recap-22nd-december-2025-55th-edition-6931ca317161
+12. Gossip based on reputation to solve for scale and moderation · Issue #75 · nostr-protocol/nips - GitHub, accessed February 23, 2026, https://github.com/nostr-protocol/nips/issues/75
+13. Gossip - Dart Nostr Development Kit (NDK), accessed February 23, 2026, https://dart-nostr.com/concepts/gossip/
+14. NIP65 - NIP-65 - Relay List Metadata, accessed February 23, 2026, https://nips.nostr.com/65
+15. Easy Modular Monolith — Part 2— The OutBox Pattern | by Norbert Dębosz | ITNEXT, accessed February 23, 2026, https://itnext.io/easy-modular-monolith-part-2-the-outbox-pattern-b4566724fb68
+16. Nostr Relays Explained: Complete Guide - Nostr.co.uk, accessed February 23, 2026, https://nostr.co.uk/learn/nostr-relays-explained/
+17. Relays | Nostr Design, accessed February 23, 2026, https://nostrdesign.org/docs/how-to/relays/
+18. dtdannen/ezdvm: Simple DVM python implementation - GitHub, accessed February 23, 2026, https://github.com/dtdannen/ezdvm
+19. nostr-sdk - crates.io: Rust Package Registry, accessed February 23, 2026, https://crates.io/crates/nostr-sdk
+20. NIP89 - NIP-89 - Recommended Application Handlers, accessed February 23, 2026, https://nips.nostr.com/89
+21. r0d8lsh0p/n8n-AI-agent-DVM-MCP-client - GitHub, accessed February 23, 2026, https://github.com/r0d8lsh0p/n8n-AI-agent-DVM-MCP-client
+22. nips/90.md at master · nostr-protocol/nips - GitHub, accessed February 23, 2026, https://github.com/nostr-protocol/nips/blob/master/90.md
+23. sebdeveloper6952/godvm: Simple framework to build DVMs with golang - GitHub, accessed February 23, 2026, https://github.com/sebdeveloper6952/godvm
+24. What are Zaps? - Nostr, accessed February 23, 2026, https://nostr.how/en/zaps
+25. NIP-90 job result confusion · Issue #1075 · nostr-protocol/nips - GitHub, accessed February 23, 2026, https://github.com/nostr-protocol/nips/issues/1075
+26. nostr/nips/ nip90.rs, accessed February 23, 2026, https://docs.rs/nostr/latest/src/nostr/nips/nip90.rs.html
+27. Standardized NIP-47 metadata for payer/payee in `list_transactions`? · Issue #1843 - GitHub, accessed February 23, 2026, https://github.com/nostr-protocol/nips/issues/1843
+28. nostr-protocol/nips: Nostr Implementation Possibilities - GitHub, accessed February 23, 2026, https://github.com/nostr-protocol/nips
+29. Nostr Relays Directory - Find Reliable Relays, accessed February 23, 2026, https://nostr.co.uk/relays/
+30. A list of nostr relays exposed as onion services - GitHub, accessed February 23, 2026, https://github.com/0xtrr/onion-service-nostr-relays
+31. nostr - crates.io: Rust Package Registry, accessed February 23, 2026, https://crates.io/crates/nostr
+32. believethehype/nostrdvm: Framework to run NIP90 Nostr DVMs - GitHub, accessed February 23, 2026, https://github.com/believethehype/nostrdvm
+33. nostr-dvm - PyPI, accessed February 23, 2026, https://pypi.org/project/nostr-dvm/
