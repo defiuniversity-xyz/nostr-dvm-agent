@@ -49,3 +49,6 @@ ui-debug.log
 .coverage
 htmlcov/
 .pytest_cache/
+Keys/
+Strike Scopes/
+Strike API Technical Audit Report.txt
