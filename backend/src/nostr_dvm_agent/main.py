@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 import sys
 
@@ -33,7 +34,7 @@ def configure_logging(level: str) -> None:
             structlog.dev.ConsoleRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(structlog, level.upper(), structlog.INFO)
+            getattr(logging, level.upper(), logging.INFO)
         ),
     )
 
@@ -93,7 +94,7 @@ async def run() -> None:
         "agent_ready",
         pubkey=nostr.public_key.to_hex(),
         services=[s.name for s in services.values()],
-        relays=settings.relay_urls,
+        relays=settings.relay_url_list,
     )
 
     shutdown_event = asyncio.Event()

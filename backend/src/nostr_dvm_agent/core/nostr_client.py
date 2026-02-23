@@ -9,10 +9,13 @@ from nostr_sdk import (
     Event,
     EventBuilder,
     Filter,
+    HandleNotification,
     Keys,
     Kind,
     NostrSigner,
     PublicKey,
+    RelayMessage,
+    RelayUrl,
     Tag,
     Timestamp,
 )
@@ -27,6 +30,22 @@ ZAP_RECEIPT_KIND = 9735
 EventCallback = Callable[[Event], Awaitable[None]]
 
 
+class _NotificationHandler(HandleNotification):
+    """Bridge between nostr-sdk's sync HandleNotification and our async callbacks."""
+
+    def __init__(self, event_queue: asyncio.Queue) -> None:
+        self._queue = event_queue
+
+    def handle(self, relay_url: RelayUrl, subscription_id: str, event: Event) -> None:
+        try:
+            self._queue.put_nowait(event)
+        except Exception:
+            pass
+
+    def handle_msg(self, relay_url: RelayUrl, msg: RelayMessage) -> None:
+        pass
+
+
 class NostrClient:
     """Manages relay connections, subscriptions, and event publishing."""
 
@@ -38,6 +57,7 @@ class NostrClient:
         self._on_job_request: EventCallback | None = None
         self._on_zap_receipt: EventCallback | None = None
         self._running = False
+        self._event_queue: asyncio.Queue[Event] = asyncio.Queue()
 
     @property
     def public_key(self) -> PublicKey:
@@ -54,11 +74,11 @@ class NostrClient:
         self._on_zap_receipt = callback
 
     async def connect(self) -> None:
-        for url in self._settings.relay_urls:
-            await self._client.add_relay(url)
+        for url in self._settings.relay_url_list:
+            await self._client.add_relay(RelayUrl.parse(url))
             logger.info("relay_added", url=url)
         await self._client.connect()
-        logger.info("connected_to_relays", count=len(self._settings.relay_urls))
+        logger.info("connected_to_relays", count=len(self._settings.relay_url_list))
 
     async def subscribe(self) -> None:
         now = Timestamp.now()
@@ -74,10 +94,8 @@ class NostrClient:
             .since(now)
         )
 
-        await self._client.subscribe(
-            [job_filter, zap_filter],
-            None,
-        )
+        await self._client.subscribe(job_filter, None)
+        await self._client.subscribe(zap_filter, None)
         logger.info(
             "subscribed",
             job_kinds=DVM_REQUEST_KINDS,
@@ -88,14 +106,24 @@ class NostrClient:
         self._running = True
         logger.info("event_loop_started")
 
-        while self._running:
-            try:
-                await self._client.handle_notifications(self._handle_notification)
-            except Exception:
-                logger.exception("notification_handler_error")
-                await asyncio.sleep(2)
+        handler = _NotificationHandler(self._event_queue)
+        notification_task = asyncio.create_task(
+            asyncio.to_thread(self._client.handle_notifications, handler)
+        )
 
-    async def _handle_notification(self, relay_url, subscription_id, event: Event) -> bool:
+        try:
+            while self._running:
+                try:
+                    event = await asyncio.wait_for(self._event_queue.get(), timeout=1.0)
+                    await self._dispatch_event(event)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    logger.exception("event_dispatch_error")
+        finally:
+            notification_task.cancel()
+
+    async def _dispatch_event(self, event: Event) -> None:
         kind_num = event.kind().as_u16()
 
         if kind_num in DVM_REQUEST_KINDS and self._on_job_request:
@@ -112,11 +140,9 @@ class NostrClient:
             except Exception:
                 logger.exception("zap_receipt_handler_error", event_id=event.id().to_hex())
 
-        return False
-
     async def publish_event(self, event_builder: EventBuilder) -> Event:
         output = await self._client.send_event_builder(event_builder)
-        event_id = output.id().to_hex()
+        event_id = output.id.to_hex()
         logger.info("event_published", event_id=event_id)
         return output
 

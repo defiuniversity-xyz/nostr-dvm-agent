@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
-
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,17 +18,10 @@ class Settings(BaseSettings):
     )
     strike_api_key: str = Field(default="", description="Strike API key for payment verification")
 
-    relay_urls: list[str] = Field(
-        default=["wss://relay.damus.io", "wss://nos.lol", "wss://relay.nostr.band"],
-        description="Nostr relay WebSocket URLs",
+    relay_urls: str = Field(
+        default="wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band",
+        description="Comma-separated Nostr relay WebSocket URLs",
     )
-
-    @field_validator("relay_urls", mode="before")
-    @classmethod
-    def _split_relay_urls(cls, v: Any) -> list[str]:
-        if isinstance(v, str):
-            return [u.strip() for u in v.split(",") if u.strip()]
-        return v
 
     default_cost_msats: int = Field(default=1000, description="Default cost in millisatoshis")
     cost_text_generation_msats: int = Field(default=500)
@@ -42,6 +33,10 @@ class Settings(BaseSettings):
     payment_timeout_secs: int = Field(default=300, description="Seconds to wait for payment")
     log_level: str = Field(default="INFO")
     db_path: str = Field(default="dvm_agent.db")
+
+    @property
+    def relay_url_list(self) -> list[str]:
+        return [u.strip() for u in self.relay_urls.split(",") if u.strip()]
 
     @property
     def ln_address_user(self) -> str:

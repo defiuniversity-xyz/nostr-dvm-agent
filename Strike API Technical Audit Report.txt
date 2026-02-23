@@ -1,0 +1,272 @@
+﻿Technical Audit and Commercial Integration Framework for the Strike.me API (v1)
+Executive Summary of the Strike Ecosystem Architecture
+The emergence of Bitcoin as a global settlement layer has necessitated the development of high-performance abstraction layers capable of bridging the gap between traditional fiat-denominated commerce and the decentralized, 24/7 nature of blockchain protocols. The Strike.me API (v1) functions as this critical bridge, offering a sophisticated representational state transfer (REST) framework that allows commercial entities to leverage the Lightning Network for near-instant, low-cost value transfer while maintaining the accounting and regulatory benefits of fiat currency.1 This technical audit provides a comprehensive analysis of the Strike architecture, detailing the integration requirements, security protocols, and operational constraints inherent in deploying Strike within a professional fintech stack.
+The Strike architecture is fundamentally built upon RESTful principles, ensuring that the API is predictable, resource-oriented, and compatible with modern web development workflows.3 It utilizes standard HTTP methods—GET for retrieval, POST for creation, PATCH for partial updates, and DELETE for resource removal—to manage the lifecycle of financial assets.3 Responses are consistently returned in JSON format, facilitating ease of parsing across diverse client environments ranging from mobile applications to server-side middleware.3 The platform's commitment to these standards reduces the cognitive load for engineers, allowing them to treat Bitcoin transactions with the same programmatic rigor as a traditional payment gateway like Stripe or Braintree.4
+A defining characteristic of the Strike API is its dual-layer approach to Bitcoin integration. By providing access to both the base layer (on-chain) and the secondary layer (Lightning Network), Strike allows developers to optimize for different transaction types.1 On-chain transactions are treated as final settlement mechanisms, ideal for large transfers where decentralized security is the paramount priority, whereas Lightning transactions are prioritized for small, high-frequency "micropayments" that require sub-second finality and negligible fees.5 The API effectively hides the complexity of node management, channel liquidity, and routing, presenting these as simple, actionable endpoints.1
+Core Authentication and Authorization Frameworks
+Security in the Strike ecosystem is governed by a robust authentication model that separates internal administrative access from delegated third-party permissions. The API supports two primary authentication vectors: static API Keys and dynamic OAuth 2.0/OpenID Connect (OIDC) tokens.3 The choice between these methods depends heavily on the intended use case, with API keys reserved for backend-to-backend communication and OAuth utilized for customer-facing applications that require permissioned access to individual Strike accounts.7
+API Key Authentication for Proprietary Systems
+API keys represent the most straightforward method for authenticating requests. They are unique alphanumeric strings generated through the Strike Dashboard and act as long-lived bearer tokens.9 In a commercial integration, these keys should be handled with extreme caution; because they do not expire, a compromise can lead to unauthorized financial operations until the key is manually revoked.9 Strike enforces a scope-based model for these keys, meaning that at the time of creation, the administrator must explicitly select the permissions associated with the key, such as read:balances or write:invoices.9 This adheres to the principle of least privilege, ensuring that a microservice responsible only for checking rates cannot be used to initiate payouts if its key were ever exposed.
+
+
+Scope
+	Permission Type
+	Description
+	read:balances
+	Read
+	Allows the application to view the current USD and BTC balances.3
+	write:invoices
+	Write
+	Enables the programmatic creation of new invoice resources.9
+	write:quotes
+	Write
+	Required for the mandatory step of generating a payment quote.9
+	read:rates
+	Read
+	Permits access to real-time currency exchange rates.9
+	write:payouts
+	Write
+	Necessary for initiating bank transfers to external accounts.3
+	Delegated Access via Strike OAuth Connect
+For applications that function as platforms—such as a marketplace or a peer-to-peer split-pay app—Strike OAuth Connect provides a secure framework for managing user funds without the application ever seeing the user's password.7 This implementation follows industry-standard OIDC protocols, where Strike acts as the identity provider. The process begins with the registration of a client, which requires a Strike business account and a clear description of the intended business case.7 Developers must provide a client secret and a set of redirect URLs to manage the post-authentication flow.7
+Once implemented, the user is redirected to the Strike authorization server (https://auth.strike.me), where they review the requested scopes and provide explicit consent.7 The resulting access token is short-lived, reducing the "attack window" compared to static keys.12 Refresh tokens are provided to ensure a seamless user experience, allowing the application to obtain new access tokens without requiring the user to re-login.3 This dynamic authorization framework is more secure for user-facing applications because it separates authentication (proving who the user is) from authorization (specifying what the application can do on the user's behalf).12
+The Transaction Lifecycle: From Intent to Settlement
+Integrating the Strike API requires a paradigm shift in how developers think about payment states. Unlike traditional credit card processing where a single "charge" call often suffices, Strike utilizes a multi-stage "Quote-to-Execution" flow designed to protect participants from the price volatility inherent in the Bitcoin markets.10
+Programmatic Flow for Receiving Payments
+The lifecycle of receiving funds begins with the creation of an Invoice resource via POST /v1/invoices. This resource serves as a formal "intent to receive" and can be denominated in various fiat or crypto currencies.1 An invoice typically requires a description and an amount, though "zero-amount" invoices are supported for use cases where the payer determines the final value at the point of sale.15
+Once the invoice is created, the system generates a corresponding receive quote. This quote contains the actual payment identifiers—either a BOLT11 Lightning invoice or a Bitcoin on-chain address.10 These are then presented to the payer as a scannable QR code or a character string.15 The application must then monitor the state of the invoice, which moves from UNPAID to PAID upon successful network delivery.15 For commercial entities, this state transition is often the trigger for releasing digital goods or updating an order status.16
+Programmatic Flow for Sending Payments and Payouts
+Sending a payment is a more complex operation that requires the application to handle real-time price discovery. The flow is strictly enforced as follows:
+1. Destination Identification: The application receives a Lightning invoice, an LNURL, a Bitcoin address, or a Strike handle.1
+2. Quote Generation: The application calls POST /v1/payment-quotes/{type}. This is a critical step because the resulting quote locks in the exchange rate between the sourceCurrency (e.g., USD) and the targetCurrency (e.g., BTC).10
+3. Execution: The application must call PATCH /v1/payment-quotes/{quoteId}/execute before the quote expires.10
+The validUntil field in the quote response indicates the precise moment the rate expires.10 For Lightning payments, this window is typically short, necessitating a fast frontend-to-backend execution path. For on-chain payments, the process is further nuanced by the selection of a fee tier. Strike offers three on-chain tiers: tier_fast (10-30 minutes), tier_standard (~1 hour), and tier_free (~12 hours).10 The selected tier determines the network fee, which is factored into the quote's totalAmount.10
+
+
+Tier
+	Delivery Time
+	Use Case
+	tier_fast
+	10-30 mins
+	High-priority settlements, interacting with exchanges.10
+	tier_standard
+	~1 hour
+	Standard B2B payments, larger consumer purchases.10
+	tier_free
+	~12 hours
+	Cold storage transfers, non-urgent treasury rebalancing.10
+	Handling Directing Payments and External Bank Transfers
+"Directing" a payment is a specialized function of the Strike API that allows funds to be sent specifically to a designated Strike user's username.1 This essentially converts an external Bitcoin or Lightning payment into an internal Strike-to-Strike transfer if the payer is also a Strike user.1 If the payment is internal and stays within the same currency (e.g., USD to USD), Strike may bypass the conversion rate logic entirely, resulting in a direct transfer without exchange fees.10
+Executing payouts to external bank accounts is a separate, more regulated flow that requires a verified "Payout Originator" and a registered "Bank Payment Method".3 A commercial application must first create an originator (POST /payout-originators) and wait for an APPROVED state.3 Subsequently, the bank account must be linked (POST /payment-methods/bank) and reach a READY state.3 Only then can the payout be created and initiated.3 This multi-step verification ensures that the bridge between the instant world of Bitcoin and the legacy world of ACH/Wire remains compliant with anti-money laundering (AML) regulations.19
+Currency and Exchange Logic: Mitigating Market Volatility
+In a commercial setting, price volatility is one of the most significant barriers to Bitcoin adoption. The Strike API addresses this through its sophisticated "Source versus Target" currency logic and its mandatory quote-locking mechanism.1
+SourceCurrency and TargetCurrency Mechanics
+When a transaction is initiated, the Strike API identifies two distinct asset pools. The sourceCurrency is the asset held by the sender—typically USD for US-based merchants—and the targetCurrency is the asset the recipient expects to receive.10 Strike acts as a real-time automated market maker (AMM), calculating the exact amount of the source asset required to fulfill the target asset's demand.1
+If a sourceCurrency is not specified, the API defaults to the account's primary currency.10 For international or cross-currency payments, Strike handles the underlying conversion programmatically, allowing a business to "stay in cash" for accounting and tax purposes while utilizing Bitcoin for the actual transmission of value.1 This "Cash-to-Bitcoin-to-Cash" rail effectively treats Bitcoin as an invisible utility rather than a speculative asset.1
+Fee Policies and Volatility Mitigation
+To ensure that the sender understands the full cost of a transaction before funds are debited, Strike uses a quote system that includes a totalAmount field.10 This amount is the sum of the transaction value and the network fee, expressed in the source currency.10 The developer can control how these fees are applied using the feePolicy parameter:
+* EXCLUSIVE: Fees are added on top of the base amount. If a user wants to send $100, and the network fee is $1, the account is debited $101, and the recipient gets exactly $100.10
+* INCLUSIVE: Fees are taken from the base amount. In the same scenario, the user's account is debited $100, and the recipient receives $99.10
+Volatility is mitigated by the validUntil duration of the quote. For the duration of this window, Strike takes the risk of the BTC/USD price moving against the transaction.10 If the price moves drastically, the quote remains valid until its expiration, providing the merchant with a fixed cost of execution.10
+The mathematical relationship for an EXCLUSIVE payout can be expressed as:
+  
+
+where    represents the amount,    is the exchange rate, and    is the fee.10
+Webhooks and Event-Driven Synchronization
+In high-concurrency fintech applications, polling is an inefficient strategy for state management. Strike provides a robust webhook system to push real-time event notifications to external services.17
+Supported Event Types and Payload Structures
+Webhooks are triggered by specific state changes within the Strike ecosystem. For a commercial application, the most critical events are those related to payment finality.17
+
+
+Event Type
+	Description
+	invoice.updated
+	Fired when an invoice changes state (e.g., from UNPAID to PAID).17
+	payout.created
+	Notifies that a bank transfer request has been successfully staged.3
+	payout.updated
+	Provides updates on the status of an ACH or Wire transfer.3
+	subscription.created
+	Confirmation that a webhook subscription is active.17
+	A typical webhook payload is "thin," meaning it contains the ID of the resource but not the full data. This encourages the developer to make a secure GET request to retrieve the latest state, preventing data tampering in the notification itself.17
+Sample Webhook Payload (invoice.updated):
+
+
+JSON
+
+
+
+
+{
+ "id": "245e40d8-f197-411c-8f20-a326d08da402",
+ "eventType": "invoice.updated",
+ "webhookVersion": "v1",
+ "data": {
+   "entityId": "602cc206-6b4a-42dd-bc89-9a534bb04034",
+   "changes": ["state"]
+ },
+ "created": "2009-01-03T18:15:00+01:00",
+ "deliverySuccess": true
+}
+
+17
+Best Practices for Signature Verification
+To ensure that an incoming webhook was actually sent by Strike and not a malicious third party, developers must implement HMAC-SHA256 signature verification.17 Strike includes a signature in the X-Webhook-Signature header of every request.17
+The verification process should follow these steps:
+1. Secret Retrieval: Obtain the secret key defined during the webhook subscription creation.17
+2. Raw Body Extraction: Capture the raw JSON request body before any parsing occurs (as parsing can change spacing and break the hash).20
+3. HMAC Computation: Generate a SHA-256 HMAC of the raw body using the secret key.20
+4. Comparison: Use a timing-safe comparison function to verify that the computed hash matches the X-Webhook-Signature header.20
+Additionally, developers should implement idempotency checks. Since Strike may deliver the same webhook multiple times (due to network retries), the application should track the id of each event and ignore duplicates.17
+Developer Experience: Environment and Tooling
+The Strike API is designed for a frictionless onboarding experience, providing a full-featured sandbox and a variety of community and official tools to accelerate the integration lifecycle.2
+The Sandbox and API Explorer
+The "Strike Sandbox" is a dedicated environment (api.dev.strike.me) that mirrors production functionality but utilizes simulated cash and Bitcoin testnet funds.23 To access the sandbox, a business account typically needs to contact Strike support to enable specific testing permissions.23 The Sandbox Dashboard allows developers to manage simulated balances and create sandbox-specific API keys with unique scopes.24
+A particularly useful feature is the "API Explorer" found within the official documentation.2 This interactive tool allows developers to:
+* View code examples in cURL, Go, Python, and Node.js.2
+* Authorize with a sandbox key and make live HTTP requests directly from the browser.2
+* Instantly see the JSON response structure for complex endpoints like quote generation.2
+Evaluation of SDKs and Language Support
+While Strike provides a pure REST interface, several libraries exist to simplify integration. The official Node.js SDK (strike-js), currently in open beta, provides a type-safe way to interact with the API in TypeScript or JavaScript environments.25 It abstracts the process of setting the Authorization header and provides helper methods for common operations like client.invoices() or client.rates().25
+In the Python ecosystem, the pystrike library is a popular community-maintained option.27 It facilitates the creation of "Charge" classes that handle the polling of invoice status if webhooks are not being used.27 For Go developers, the API Explorer provides the most up-to-date patterns for structuring requests using the standard library's http package.2
+
+
+Language
+	Primary Resource
+	Status
+	Node.js
+	strike-js
+	Official / Open Beta.25
+	Python
+	pystrike / chmoder/strike-api
+	Community Maintained.27
+	Go
+	API Explorer Snippets
+	Manual Implementation.2
+	cURL
+	API Reference
+	Standard Documentation.2
+	Operational Limits and Compliance Requirements
+A critical component of a technical audit is the identification of throughput constraints and regulatory hurdles. Strike enforces strict limits to ensure platform stability and adheres to global financial compliance standards.11
+Rate Limiting and Performance Bounds
+Strike utilizes an IP-based rate limiting system. If an application exceeds these limits, the API returns an HTTP 429 Too Many Requests status code.11 A retry-after header is included to inform the client when they can resume requests.11
+
+
+Endpoint Type
+	Production Limit
+	Sandbox Limit
+	/v1/invoices/
+	250 req / 1 min
+	90 req / 1 min.11
+	/v1/invoices/:id/quote
+	250 req / 1 min
+	90 req / 1 min.11
+	/v1/rates/
+	250 req / 1 min
+	90 req / 1 min.11
+	/v1/payment-quotes/
+	250 req / 1 min
+	90 req / 1 min.11
+	All Other Endpoints
+	1,000 req / 10 min
+	350 req / 10 min.11
+	Applications anticipating high volume, such as a large-scale e-commerce platform or a global remittance service, should contact Strike's partner team (partners@strike.me) early in the development cycle to negotiate higher rate limits.11
+Business vs. Individual Onboarding Requirements
+The requirements for a Strike API account depend heavily on whether the user is an individual or a business. Individuals can complete KYC (Know Your Customer) verification through the mobile app by providing basic identity details and a photo ID.30 However, commercial integrations must use a Business Account.30
+Business verification is a manual process that involves:
+1. Company Data: Submission of incorporation documents, EIN, and official business address.18
+2. Operator Verification: KYC checks for all directors and owners holding more than 10% of the company's shares.18
+3. Usage Audit: A detailed description of how the Strike API will be used and the expected transaction volume.18
+4. Financial Proof: In many cases, a recent business bank statement or utility bill (POBOA) is required to verify the entity's physical presence.18
+Failure to provide clear documentation during this phase is the primary cause of delays in moving from sandbox to production.7
+Common Integration Pitfalls and Strategic Mitigation
+Analyzing developer experiences and forum discussions reveals several recurring "trap doors" that can derail a Strike integration. Solutions architects should account for these during the design phase.32
+Error Handling and State Synchronization
+A common mistake is treating the "Quote" as a final payment. Developers often fail to account for the expiration of BOLT11 invoices or Strike quotes.10 If a user takes too long on the checkout screen, the quote's validUntil timestamp will pass, and any attempt to execute the payment will fail with an INVALID_DATA or QUOTE_EXPIRED error.3 Strategic Fix: Implement a countdown timer on the frontend that matches the quote's expiration. If the timer hits zero, the application should automatically refresh the quote behind the scenes.32
+The "Terminal-Phobia" and UX Challenge
+Fintech users often expect a polished graphical user interface (GUI). Many early Bitcoin integrations failed because they presented users with raw terminal outputs or complex alphanumeric strings without context.34 Strategic Fix: Use standard QR code libraries to present Lightning invoices. Ensure that error messages are human-readable (e.g., "Insufficient funds" instead of a raw 400 status code with a JSON body).3
+Webhook Reliability and Idempotency
+Relying on a single webhook delivery without failure recovery can lead to "ghost orders" where a customer pays but the merchant's database is never updated.17 Strategic Fix: Always return a 2xx response immediately upon receiving a webhook and process the logic in a background worker. Additionally, implement a "Reconciliation Job" that polls Strike for the status of any PENDING invoices that haven't received a webhook update within a reasonable timeframe (e.g., 30 minutes).17
+Dependency and Version Management
+The Strike API is under active development. Recent updates have changed how balances are reported, deprecating the outgoing and total properties in favor of current, pending, and reserved.3 Strategic Fix: Pin your API requests to a specific version in the URL (e.g., /v1/) and regularly monitor the Strike changelog for breaking changes.3
+Technical Summary of Core Endpoints
+The following table serves as a reference guide for the core endpoints required to build a full-lifecycle Strike integration.
+
+
+Resource
+	Method
+	Endpoint
+	Primary Use Case
+	Invoices
+	POST
+	/v1/invoices
+	Generate a request for payment.11
+	Quotes
+	POST
+	/v1/payment-quotes/:type
+	Lock in an exchange rate for a payment.10
+	Execution
+	PATCH
+	/v1/payment-quotes/:id/execute
+	Finalize a payment using a valid quote.10
+	Payouts
+	POST
+	/v1/payouts
+	Stage a transfer to an external bank.3
+	Bank Setup
+	POST
+	/v1/payment-methods/bank
+	Register a new external bank account.3
+	Webhooks
+	POST
+	/v1/subscriptions
+	Register an endpoint for event notifications.17
+	Balances
+	GET
+	/v1/balances
+	Monitor USD and BTC treasury levels.3
+	Rates
+	GET
+	/v1/rates
+	Fetch current market pricing for BTC/USD.11
+	Insights and Future Outlook for Strike v1
+The Strike API (v1) represents a significant maturation of the "Bitcoin-as-a-Rail" philosophy. By focusing on RESTful accessibility and robust security through OAuth 2.0, Strike has made it possible for any enterprise to integrate global, instant payments without needing a PhD in cryptography.1 The strategic advantage of this system lies in its ability to decouple the volatility of Bitcoin from the utility of its network.1
+Architecturally, the mandatory quote-execution flow is the most important technical feature for commercial stability. It essentially provides a short-term "insurance policy" against price fluctuations, which is the missing piece for most traditional merchants looking to enter the Bitcoin space.10 As the ecosystem moves toward more integrated financial services—such as automated tax withholding and multi-currency treasury management—Strike’s role as the primary abstraction layer for Bitcoin Layer 2 is likely to expand.1
+For the Senior Solutions Architect, the integration of Strike is not merely about adding "Bitcoin support" but about upgrading the underlying payment infrastructure to a global, 24/7, programmable standard. The trade-offs involved—primarily the manual onboarding for business accounts and the strict rate limiting—are standard for regulated fintech and should be factored into any project's critical path.11 By following the best practices of signature verification, idempotent event handling, and asynchronous processing, a Strike integration can provide a competitive edge in a globalized economy that increasingly demands instant value settlement.17
+Works cited
+1. What is the Strike API?, accessed February 23, 2026, https://strike.me/learn/what-is-the-strike-api/
+2. Introduction | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/
+3. Introduction | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/api/
+4. 4N1S/strikeLN-node: Strike SDK Nodejs Lightning Network Bitcoin for Testnet - GitHub, accessed February 23, 2026, https://github.com/4N1S/strikeLN-node
+5. Transacting bitcoin on-chain vs. Lightning - Strike, accessed February 23, 2026, https://strike.me/learn/transacting-bitcoin-on-chain-vs-lightning/
+6. What Are Lightning Payments? - Lightspark, accessed February 23, 2026, https://www.lightspark.com/knowledge/what-are-lightning-payments
+7. Strike OAuth Connect | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/strike-oauth-connect/
+8. API Key vs OAuth: Which Authentication is Best for You? - BoldSign, accessed February 23, 2026, https://boldsign.com/blogs/api-keys-vs-oauth-authentication/
+9. Overview | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/api-keys/overview/
+10. Sending payments | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/walkthrough/sending-payments/
+11. Limits on API requests | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/rate-limits/
+12. API Keys vs OAuth: Which API Authentication Method Is More Secure? - Aembit, accessed February 23, 2026, https://aembit.io/blog/api-keys-vs-oauth-authentication-security/
+13. OAuth vs API Keys: Which API authentication method to choose? - Digital API, accessed February 23, 2026, https://www.digitalapi.ai/blogs/oauth-vs-api-keys-which-api-authentication-method-to-choose
+14. API Security: Authentication vs Authorization - Check Point Software, accessed February 23, 2026, https://www.checkpoint.com/cyber-hub/cloud-security/what-is-application-security-appsec/api-security-authentication-vs-authorization/
+15. Receiving payments | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/walkthrough/receiving-payments/
+16. Example apps | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/walkthrough/example-apps/
+17. Setting up webhooks | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/webhooks/setting-up-webhooks/
+18. Strike Business - Business Bitcoin Wallet for companies - Coincharge, accessed February 23, 2026, https://coincharge.io/en/strike-business/
+19. Strike Business Terms and Conditions, accessed February 23, 2026, https://strike.me/business-terms/
+20. Signature verification | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/webhooks/signature-verification/
+21. Verify Signatures - Coinbase Developer Documentation, accessed February 23, 2026, https://docs.cdp.coinbase.com/data/webhooks/verify-signatures
+22. Receive Stripe events in your webhook endpoint, accessed February 23, 2026, https://docs.stripe.com/webhooks
+23. Developers - Strike, accessed February 23, 2026, https://strike.me/faq/does-the-strike-api-have-a-sandbox-environment/
+24. Sandbox | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/sandbox/
+25. StrikeFinance/strike-js: Strike JavaScript SDK - GitHub, accessed February 23, 2026, https://github.com/StrikeFinance/strike-js
+26. rahulbile/strike-node: Strike.me API client for node.js - GitHub, accessed February 23, 2026, https://github.com/rahulbile/strike-node
+27. JASchilz/pystrike: Python library for interacting with Acinq's Strike lightning network payment web service. - GitHub, accessed February 23, 2026, https://github.com/JASchilz/pystrike
+28. A python client for the strike api - GitHub, accessed February 23, 2026, https://github.com/chmoder/strike-api
+29. Developers - Strike, accessed February 23, 2026, https://strike.me/faq/how-do-i-get-started-as-a-developer/
+30. Overview | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/account/overview/
+31. How to get verified for a Business account | Kraken - Support, accessed February 23, 2026, https://support.kraken.com/articles/115004862007-business-account
+32. API Integration Mistakes and How to Avoid Them - Ficode, accessed February 23, 2026, https://www.ficode.com/blog/api-integration-mistakes-and-how-to-avoid-them
+33. The Hidden Pitfalls of API Integration— And How to Fix Them | by M Haseeb Asif | Big Data Processing | Medium, accessed February 23, 2026, https://medium.com/big-data-processing/the-hidden-pitfalls-of-api-integration-and-how-to-fix-them-1f051997c78e
+34. SMAPI's Eternal September, or, we need a GUI. - Reddit, accessed February 23, 2026, https://www.reddit.com/r/SMAPI/comments/1nu2pq0/smapis_eternal_september_or_we_need_a_gui/
+35. Overview | Strike API Documentation, accessed February 23, 2026, https://docs.strike.me/webhooks/overview/
+36. 5 Most Trusted Bitcoin Investment Sites (What to Know in May 2025), accessed February 23, 2026, https://www.swanbitcoin.com/industry/bitcoin-investment-sites/
