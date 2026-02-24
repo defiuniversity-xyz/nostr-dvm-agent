@@ -108,7 +108,7 @@ class NostrClient:
 
         handler = _NotificationHandler(self._event_queue)
         notification_task = asyncio.create_task(
-            asyncio.to_thread(self._client.handle_notifications, handler)
+            self._client.handle_notifications(handler)
         )
 
         try:
